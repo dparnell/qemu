@@ -139,8 +139,10 @@ static void bmdma_write(void *opaque, hwaddr addr,
         bmdma_cmd_writeb(bm, val);
         break;
     case 1:
+        /* Interrupt status bits are write-1-to-clear */
         pci_dev->config[MRDMODE] =
-            (pci_dev->config[MRDMODE] & ~0x30) | (val & 0x30);
+            ((pci_dev->config[MRDMODE] & ~0x30) | (val & 0x30)) &
+            ~(val & (MRDMODE_INTR_CH0 | MRDMODE_INTR_CH1));
         cmd646_update_dma_interrupts(pci_dev);
         cmd646_update_irq(pci_dev);
         break;
@@ -182,11 +184,16 @@ static void bmdma_setup_bar(PCIIDEState *d)
 
 static void cmd646_update_irq(PCIDevice *pd)
 {
+    PCIIDEState *d = PCI_IDE(pd);
     int pci_level;
 
-    pci_level = ((pd->config[MRDMODE] & MRDMODE_INTR_CH0) &&
+    /*
+     * The status bits are latched (see cmd646_set_irq), so drive the PCI
+     * line from the live INTRQ level instead.
+     */
+    pci_level = ((d->irq_level & 1) &&
                  !(pd->config[MRDMODE] & MRDMODE_BLK_CH0)) ||
-        ((pd->config[MRDMODE] & MRDMODE_INTR_CH1) &&
+        ((d->irq_level & 2) &&
          !(pd->config[MRDMODE] & MRDMODE_BLK_CH1));
     pci_set_irq(pd, pci_level);
 }
@@ -196,15 +203,19 @@ static void cmd646_set_irq(void *opaque, int channel, int level)
 {
     PCIIDEState *d = opaque;
     PCIDevice *pd = PCI_DEVICE(d);
-    int irq_mask;
 
-    irq_mask = MRDMODE_INTR_CH0 << channel;
+    /*
+     * Like real silicon, latch the channel's interrupt status on assertion;
+     * only a guest write-1-to-clear resets it. Solaris' uata reads the ATA
+     * status register (dropping INTRQ) before polling CFR for this bit.
+     */
     if (level) {
-        pd->config[MRDMODE] |= irq_mask;
+        d->irq_level |= 1 << channel;
+        pd->config[MRDMODE] |= MRDMODE_INTR_CH0 << channel;
+        cmd646_update_dma_interrupts(pd);
     } else {
-        pd->config[MRDMODE] &= ~irq_mask;
+        d->irq_level &= ~(1 << channel);
     }
-    cmd646_update_dma_interrupts(pd);
     cmd646_update_irq(pd);
 }
 
