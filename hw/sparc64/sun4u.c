@@ -311,12 +311,23 @@ typedef struct CPUStartData {
     uint64_t arg;
     uint64_t tbr;
     uint32_t pstate;
+    uint32_t wstate;
     uint64_t lsu;
     SparcV9MMU immu;
     SparcV9MMU dmmu;
     SparcTLBEntry itlb[64];
     SparcTLBEntry dtlb[64];
+    CPUState *cs;
+    QEMUTimer *timer;
 } CPUStartData;
+
+/*
+ * The started CPU's first PROM calls (from sfmmu_mp_startup in Solaris) are
+ * made before it can take the OS's PROM lock, while the boot CPU is still
+ * returning from SUNW,start-cpu through the same OpenBIOS client interface.
+ * OpenBIOS is not reentrant, so let the boot CPU get out first.
+ */
+#define CPU_START_DELAY_NS   (20 * SCALE_MS)
 
 static void cpu_start_work(CPUState *cs, run_on_cpu_data data)
 {
@@ -331,12 +342,15 @@ static void cpu_start_work(CPUState *cs, run_on_cpu_data data)
     env->lsu = d->lsu;
     tlb_flush(cs);
 
-    /* All register windows free and clean, as after a PROM reset */
+    /*
+     * All register windows free and clean. Spills and fills go through the
+     * caller's trap table, so they need the caller's window state selector.
+     */
     env->cansave = env->nwindows - 2;
     env->canrestore = 0;
     env->otherwin = 0;
     env->cleanwin = env->nwindows - 2;
-    env->wstate = 0;
+    env->wstate = d->wstate;
 
     env->tl = 0;
     env->tbr = d->tbr;
@@ -347,7 +361,15 @@ static void cpu_start_work(CPUState *cs, run_on_cpu_data data)
     env->npc = d->pc + 4;
 
     cs->halted = 0;
+    timer_free(d->timer);
     g_free(d);
+}
+
+static void cpu_start_timer(void *opaque)
+{
+    CPUStartData *d = opaque;
+
+    async_run_on_cpu(d->cs, cpu_start_work, RUN_ON_CPU_HOST_PTR(d));
 }
 
 static void cpu_start(CPUStartRegs *s, unsigned int id)
@@ -367,12 +389,16 @@ static void cpu_start(CPUStartRegs *s, unsigned int id)
     d->arg = s->arg;
     d->tbr = env->tbr;
     d->pstate = env->pstate;
+    d->wstate = env->wstate;
     d->lsu = env->lsu;
     d->immu = env->immu;
     d->dmmu = env->dmmu;
     memcpy(d->itlb, env->itlb, sizeof(d->itlb));
     memcpy(d->dtlb, env->dtlb, sizeof(d->dtlb));
-    async_run_on_cpu(cs, cpu_start_work, RUN_ON_CPU_HOST_PTR(d));
+    d->cs = cs;
+    d->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, cpu_start_timer, d);
+    timer_mod(d->timer,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + CPU_START_DELAY_NS);
 }
 
 static uint64_t cpu_start_read(void *opaque, hwaddr addr, unsigned size)
