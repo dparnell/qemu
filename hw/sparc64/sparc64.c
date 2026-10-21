@@ -54,20 +54,21 @@ void sparc64_cpu_set_ivec_irq(void *opaque, int irq, int level)
     if (level) {
         if (!(env->ivec_status & 0x20)) {
             trace_sparc64_cpu_ivec_raise_irq(irq);
-            cs = CPU(cpu);
-            cs->halted = 0;
-            env->interrupt_index = TT_IVEC;
-            env->ivec_status |= 0x20;
-            env->ivec_data[0] = (0x1f << 6) | irq;
-            env->ivec_data[1] = 0;
-            env->ivec_data[2] = 0;
-            cpu_interrupt(cs, CPU_INTERRUPT_HARD);
+            sparc64_ivec_deliver(env, irq + 1, (0x1f << 6) | irq, 0, 0);
+        } else if (env->ivec_dev != irq + 1) {
+            /* Busy with another vector (maybe a mondo): retry when freed */
+            env->ivec_retry = irq + 1;
         }
     } else {
-        if (env->ivec_status & 0x20) {
+        if (env->ivec_retry == irq + 1) {
+            env->ivec_retry = 0;
+        }
+        /* Only withdraw this device's own vector, never a mondo */
+        if ((env->ivec_status & 0x20) && env->ivec_dev == irq + 1) {
             trace_sparc64_cpu_ivec_lower_irq(irq);
             cs = CPU(cpu);
             env->ivec_status &= ~0x20;
+            env->ivec_dev = 0;
             cpu_reset_interrupt(cs, CPU_INTERRUPT_HARD);
         }
     }

@@ -19,6 +19,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/log.h"
+#include "qemu/main-loop.h"
 #include "qemu/range.h"
 #include "cpu.h"
 #include "tcg/tcg.h"
@@ -1529,6 +1530,7 @@ uint64_t helper_ld_asi(CPUSPARCState *env, target_ulong addr,
             break;
         }
     case ASI_INTR_DISPATCH_STAT: /* Interrupt dispatch, RO */
+        ret = env->ivec_dispatch;
         break;
     case ASI_INTR_RECEIVE: /* Interrupt data receive */
         ret = env->ivec_status;
@@ -1882,7 +1884,65 @@ void helper_st_asi(CPUSPARCState *env, target_ulong addr, target_ulong val,
         demap_tlb(env->dtlb, addr, "dmmu", env);
         return;
     case ASI_INTR_RECEIVE: /* Interrupt data receive */
-        env->ivec_status = val & 0x20;
+        {
+            BQL_LOCK_GUARD();
+
+            env->ivec_status = val & 0x20;
+            if (!(env->ivec_status & 0x20)) {
+                env->ivec_dev = 0;
+                /*
+                 * The vector trap has been taken: forget it, so it is not
+                 * taken again with stale data once interrupts are enabled.
+                 */
+                if (env->interrupt_index == TT_IVEC) {
+                    env->interrupt_index = 0;
+                    cpu_reset_interrupt(cs, CPU_INTERRUPT_HARD);
+                    cpu_check_irqs(env);
+                }
+                /* Deliver a device vector refused while this one was busy */
+                if (env->ivec_retry) {
+                    unsigned int ino = env->ivec_retry - 1;
+
+                    env->ivec_retry = 0;
+                    sparc64_ivec_deliver(env, ino + 1, (0x1f << 6) | ino,
+                                         0, 0);
+                }
+            }
+            return;
+        }
+    case ASI_INTR_W: /* Interrupt vector dispatch (UltraSPARC I/II) */
+        if (addr == 0x40 || addr == 0x50 || addr == 0x60) {
+            /* Outgoing interrupt data registers */
+            env->ivec_out[(addr - 0x40) >> 4] = val;
+        } else if ((addr & 0x3fff) == 0x70) {
+            /* Dispatch: VA bits 18:14 hold the target's UPA port ID */
+            CPUState *tcs = qemu_get_cpu((addr >> 14) & 0x1f);
+            CPUSPARCState *tenv;
+
+            BQL_LOCK_GUARD();
+            if (!tcs || tcs == cs) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "mondo to missing CPU %d\n",
+                              (int)((addr >> 14) & 0x1f));
+                env->ivec_dispatch = 2; /* NACK */
+                return;
+            }
+            tenv = cpu_env(tcs);
+            if (tenv->ivec_status & 0x20) {
+                env->ivec_dispatch = 2; /* NACK: target busy, OS retries */
+                /*
+                 * The OS spins re-sending until the target takes its vector.
+                 * Let other vCPUs run, or single-threaded TCG starves the
+                 * very CPU this one is waiting for.
+                 */
+                cpu_exit(cs);
+            } else {
+                env->ivec_dispatch = 0;
+                sparc64_ivec_deliver(tenv, 0, env->ivec_out[0],
+                                     env->ivec_out[1], env->ivec_out[2]);
+            }
+        }
+        /* Other addresses are UDB error/control registers: ignore */
         return;
     case ASI_SCRATCHPAD: /* UA2005 privileged scratchpad */
         if (unlikely((addr >= 0x20) && (addr < 0x30))) {

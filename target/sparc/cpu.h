@@ -536,6 +536,13 @@ struct CPUArchState {
     /* Interrupt vector registers */
     uint64_t ivec_status;
     uint64_t ivec_data[3];
+    /* Device INO + 1 whose vector is in ivec_data, or 0 (none or a mondo) */
+    uint32_t ivec_dev;
+    /* Device INO + 1 refused while ivec_data was busy, or 0 */
+    uint32_t ivec_retry;
+    /* Outgoing mondo data (ASI 0x77) and dispatch status (ASI 0x48) */
+    uint64_t ivec_out[3];
+    uint64_t ivec_dispatch;
     uint32_t softint;
 #define SOFTINT_TIMER   1
 #define SOFTINT_STIMER  (1 << 16)
@@ -631,6 +638,8 @@ void cpu_set_cwp(CPUSPARCState *env1, int new_cwp);
 
 /* sun4m.c, sun4u.c */
 void cpu_check_irqs(CPUSPARCState *env);
+void sparc64_ivec_deliver(CPUSPARCState *env, uint32_t dev,
+                          uint64_t d0, uint64_t d1, uint64_t d2);
 
 #if defined (TARGET_SPARC64)
 

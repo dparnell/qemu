@@ -65,6 +65,28 @@ static const char * const excp_names[0x80] = {
 #endif
 
 #if !defined(CONFIG_USER_ONLY)
+/*
+ * Fill the incoming interrupt vector registers and raise the interrupt vector
+ * trap. dev is the device INO + 1 for a device interrupt, 0 for a mondo from
+ * another CPU. The caller holds the BQL and has checked the vector is free.
+ */
+void sparc64_ivec_deliver(CPUSPARCState *env, uint32_t dev,
+                          uint64_t d0, uint64_t d1, uint64_t d2)
+{
+    CPUState *cs = env_cpu(env);
+
+    g_assert(bql_locked());
+
+    env->ivec_data[0] = d0;
+    env->ivec_data[1] = d1;
+    env->ivec_data[2] = d2;
+    env->ivec_dev = dev;
+    env->ivec_status |= 0x20;
+    env->interrupt_index = TT_IVEC;
+    cs->halted = 0;
+    cpu_interrupt(cs, CPU_INTERRUPT_HARD);
+}
+
 void cpu_check_irqs(CPUSPARCState *env)
 {
     CPUState *cs;
