@@ -295,15 +295,19 @@ trap_state *cpu_tsptr(CPUSPARCState* env)
     return &env->ts[env->tl & MAXTL_MASK];
 }
 
+/*
+ * The tick timers set SOFTINT bits from the main loop, so the read-modify-
+ * write of SOFTINT must be done under the BQL as well; otherwise with MTTCG
+ * a bit the OS has just cleared can come back, or a new one can be lost.
+ * The caller holds the BQL (system emulation).
+ */
 static bool do_modify_softint(CPUSPARCState *env, uint32_t value)
 {
     if (env->softint != value) {
         env->softint = value;
 #if !defined(CONFIG_USER_ONLY)
         if (cpu_interrupts_enabled(env)) {
-            bql_lock();
             cpu_check_irqs(env);
-            bql_unlock();
         }
 #endif
         return true;
@@ -313,6 +317,9 @@ static bool do_modify_softint(CPUSPARCState *env, uint32_t value)
 
 void helper_set_softint(CPUSPARCState *env, uint64_t value)
 {
+#if !defined(CONFIG_USER_ONLY)
+    BQL_LOCK_GUARD();
+#endif
     if (do_modify_softint(env, env->softint | (uint32_t)value)) {
         trace_int_helper_set_softint(env->softint);
     }
@@ -320,6 +327,9 @@ void helper_set_softint(CPUSPARCState *env, uint64_t value)
 
 void helper_clear_softint(CPUSPARCState *env, uint64_t value)
 {
+#if !defined(CONFIG_USER_ONLY)
+    BQL_LOCK_GUARD();
+#endif
     if (do_modify_softint(env, env->softint & (uint32_t)~value)) {
         trace_int_helper_clear_softint(env->softint);
     }
@@ -327,6 +337,9 @@ void helper_clear_softint(CPUSPARCState *env, uint64_t value)
 
 void helper_write_softint(CPUSPARCState *env, uint64_t value)
 {
+#if !defined(CONFIG_USER_ONLY)
+    BQL_LOCK_GUARD();
+#endif
     if (do_modify_softint(env, (uint32_t)value)) {
         trace_int_helper_write_softint(env->softint);
     }
