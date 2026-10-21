@@ -54,6 +54,9 @@
 #include "hw/core/sysbus.h"
 #include "hw/ide/pci.h"
 #include "hw/core/loader.h"
+#include "hw/core/cpu.h"
+#include "exec/cputlb.h"
+#include "qemu/log.h"
 #include "hw/core/fw-path-provider.h"
 #include "elf.h"
 #include "trace.h"
@@ -69,6 +72,7 @@
 #define PROM_FILENAME        "openbios-sparc64"
 #define NVRAM_SIZE           0x2000
 #define BIOS_CFG_IOPORT      0x510
+#define CPU_START_IOPORT     0x520
 #define FW_CFG_SPARC64_WIDTH (FW_CFG_ARCH_LOCAL + 0x00)
 #define FW_CFG_SPARC64_HEIGHT (FW_CFG_ARCH_LOCAL + 0x01)
 #define FW_CFG_SPARC64_DEPTH (FW_CFG_ARCH_LOCAL + 0x02)
@@ -279,6 +283,135 @@ static const TypeInfo power_info = {
     .parent        = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(PowerDevice),
     .class_init    = power_class_init,
+};
+
+/*
+ * CPU start register, for the SUNW,start-cpu client service of the OpenBIOS
+ * nvramrc patches. Real firmware parks secondary CPUs in a PROM loop; OpenBIOS
+ * has none, so the firmware writes the entry PC and its argument (as 32-bit
+ * halves), then the UPA port ID of a halted CPU to start it there. Not part
+ * of any real machine.
+ */
+#define CPU_START_PC_LO      0x00
+#define CPU_START_PC_HI      0x04
+#define CPU_START_ARG_LO     0x08
+#define CPU_START_ARG_HI     0x0c
+#define CPU_START_GO         0x10
+#define CPU_START_SIZE       0x14
+
+typedef struct CPUStartRegs {
+    MemoryRegion iomem;
+    uint64_t pc;
+    uint64_t arg;
+} CPUStartRegs;
+
+/* State the started CPU inherits from the CPU that asked to start it */
+typedef struct CPUStartData {
+    uint64_t pc;
+    uint64_t arg;
+    uint64_t tbr;
+    uint32_t pstate;
+    uint64_t lsu;
+    SparcV9MMU immu;
+    SparcV9MMU dmmu;
+    SparcTLBEntry itlb[64];
+    SparcTLBEntry dtlb[64];
+} CPUStartData;
+
+static void cpu_start_work(CPUState *cs, run_on_cpu_data data)
+{
+    CPUStartData *d = data.host_ptr;
+    CPUSPARCState *env = cpu_env(cs);
+
+    /* Same mappings as the boot CPU, as if it had been parked in the PROM */
+    env->immu = d->immu;
+    env->dmmu = d->dmmu;
+    memcpy(env->itlb, d->itlb, sizeof(env->itlb));
+    memcpy(env->dtlb, d->dtlb, sizeof(env->dtlb));
+    env->lsu = d->lsu;
+    tlb_flush(cs);
+
+    /* All register windows free and clean, as after a PROM reset */
+    env->cansave = env->nwindows - 2;
+    env->canrestore = 0;
+    env->otherwin = 0;
+    env->cleanwin = env->nwindows - 2;
+    env->wstate = 0;
+
+    env->tl = 0;
+    env->tbr = d->tbr;
+    env->psrpil = 15;
+    cpu_change_pstate(env, d->pstate & ~(PS_IE | PS_AG | PS_RED));
+    env->regwptr[WREG_O0] = d->arg;
+    env->pc = d->pc;
+    env->npc = d->pc + 4;
+
+    cs->halted = 0;
+    g_free(d);
+}
+
+static void cpu_start(CPUStartRegs *s, unsigned int id)
+{
+    CPUState *src = current_cpu ? current_cpu : first_cpu;
+    CPUSPARCState *env = cpu_env(src);
+    CPUState *cs = qemu_get_cpu(id);
+    CPUStartData *d;
+
+    if (!cs || cs == src || !cs->halted) {
+        qemu_log_mask(LOG_GUEST_ERROR, "sun4u: cannot start CPU %u\n", id);
+        return;
+    }
+
+    d = g_new(CPUStartData, 1);
+    d->pc = s->pc;
+    d->arg = s->arg;
+    d->tbr = env->tbr;
+    d->pstate = env->pstate;
+    d->lsu = env->lsu;
+    d->immu = env->immu;
+    d->dmmu = env->dmmu;
+    memcpy(d->itlb, env->itlb, sizeof(d->itlb));
+    memcpy(d->dtlb, env->dtlb, sizeof(d->dtlb));
+    async_run_on_cpu(cs, cpu_start_work, RUN_ON_CPU_HOST_PTR(d));
+}
+
+static uint64_t cpu_start_read(void *opaque, hwaddr addr, unsigned size)
+{
+    return 0;
+}
+
+static void cpu_start_write(void *opaque, hwaddr addr, uint64_t val,
+                            unsigned size)
+{
+    CPUStartRegs *s = opaque;
+
+    switch (addr) {
+    case CPU_START_PC_LO:
+        s->pc = deposit64(s->pc, 0, 32, val);
+        break;
+    case CPU_START_PC_HI:
+        s->pc = deposit64(s->pc, 32, 32, val);
+        break;
+    case CPU_START_ARG_LO:
+        s->arg = deposit64(s->arg, 0, 32, val);
+        break;
+    case CPU_START_ARG_HI:
+        s->arg = deposit64(s->arg, 32, 32, val);
+        break;
+    case CPU_START_GO:
+        cpu_start(s, val);
+        break;
+    }
+}
+
+static const MemoryRegionOps cpu_start_ops = {
+    .read = cpu_start_read,
+    .write = cpu_start_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 4,
+        .max_access_size = 4,
+    },
 };
 
 static void ebus_isa_irq_handler(void *opaque, int n, int level)
@@ -701,6 +834,15 @@ static void sun4uv_init(MemoryRegion *address_space_mem,
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
     memory_region_add_subregion(pci_address_space_io(ebus), BIOS_CFG_IOPORT,
                                 &FW_CFG_IO(dev)->comb_iomem);
+
+    if (machine->smp.cpus > 1) {
+        CPUStartRegs *cpu_start_regs = g_new0(CPUStartRegs, 1);
+
+        memory_region_init_io(&cpu_start_regs->iomem, NULL, &cpu_start_ops,
+                              cpu_start_regs, "cpu-start", CPU_START_SIZE);
+        memory_region_add_subregion(pci_address_space_io(ebus),
+                                    CPU_START_IOPORT, &cpu_start_regs->iomem);
+    }
 
     fw_cfg = FW_CFG(dev);
     fw_cfg_add_i16(fw_cfg, FW_CFG_NB_CPUS, (uint16_t)machine->smp.cpus);
