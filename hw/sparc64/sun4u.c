@@ -731,6 +731,10 @@ static void sun4uv_init(MemoryRegion *address_space_mem,
     for (i = 1; i < machine->smp.cpus; i++) {
         sparc64_cpu_devinit(machine->cpu_type, i, hwdef->prom_addr);
     }
+    /* OpenBIOS is mapped at PROM_VADDR (see prom_vaddr) */
+    for (i = 0; i < machine->smp.cpus; i++) {
+        cpu_env(qemu_get_cpu(i))->prom_vaddr = PROM_VADDR;
+    }
 
     /* IOMMU */
     iommu = qdev_new(TYPE_SUN4U_IOMMU);

@@ -543,6 +543,15 @@ struct CPUArchState {
     /* Outgoing mondo data (ASI 0x77) and dispatch status (ASI 0x48) */
     uint64_t ivec_out[3];
     uint64_t ivec_dispatch;
+    /*
+     * Start of the firmware's virtual range (up to 4G), or 0. On each client
+     * interface call OpenBIOS saves and restores all register windows and the
+     * trap stack by stepping %cwp and %tl, with interrupts enabled, using %g7
+     * as scratch. An interrupt taken there corrupts the client's registers,
+     * so interrupts wait while the CPU executes the firmware on the client's
+     * trap table (see sparc_cpu_exec_interrupt).
+     */
+    uint64_t prom_vaddr;
     uint32_t softint;
 #define SOFTINT_TIMER   1
 #define SOFTINT_STIMER  (1 << 16)

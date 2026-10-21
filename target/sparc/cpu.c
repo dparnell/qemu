@@ -89,6 +89,20 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     if (interrupt_request & CPU_INTERRUPT_HARD) {
         CPUSPARCState *env = cpu_env(cs);
 
+#if defined(TARGET_SPARC64)
+        if (env->prom_vaddr && env->pc >= env->prom_vaddr &&
+            env->pc < 0x100000000ULL &&
+            (env->tl > 0 || (env->tbr < env->prom_vaddr &&
+                             env->interrupt_index != (TT_EXTINT | 14)))) {
+            /*
+             * In a client interface call (the OS owns the trap table) or
+             * with the firmware juggling the trap stack: wait for it to
+             * return. The level 14 tick is left alone; the OS forwards it to
+             * the firmware's own handler.
+             */
+            return false;
+        }
+#endif
         if (cpu_interrupts_enabled(env) && env->interrupt_index > 0) {
             int pil = env->interrupt_index & 0xf;
             int type = env->interrupt_index & 0xf0;
