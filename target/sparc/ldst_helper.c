@@ -1404,7 +1404,8 @@ uint64_t helper_ld_asi(CPUSPARCState *env, target_ulong addr,
         g_assert_not_reached();
 
     case ASI_UPA_CONFIG: /* UPA config */
-        /* XXX */
+        /* MID (UPA port ID) in bits 21:17; the rest is not modelled */
+        ret = (uint64_t)(env_cpu(env)->cpu_index & 0x1f) << 17;
         break;
     case ASI_LSU_CONTROL: /* LSU */
         ret = env->lsu;

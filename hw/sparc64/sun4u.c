@@ -555,8 +555,11 @@ static void sun4uv_init(MemoryRegion *address_space_mem,
     MACAddr macaddr;
     bool onboard_nic;
 
-    /* init CPUs */
-    cpu = sparc64_cpu_devinit(machine->cpu_type, hwdef->prom_addr);
+    /* init CPUs; CPU n has UPA port ID n */
+    cpu = sparc64_cpu_devinit(machine->cpu_type, 0, hwdef->prom_addr);
+    for (i = 1; i < machine->smp.cpus; i++) {
+        sparc64_cpu_devinit(machine->cpu_type, i, hwdef->prom_addr);
+    }
 
     /* IOMMU */
     iommu = qdev_new(TYPE_SUN4U_IOMMU);
@@ -582,7 +585,10 @@ static void sun4uv_init(MemoryRegion *address_space_mem,
     /* pci_ioport */
     sysbus_mmio_map(SYS_BUS_DEVICE(sabre), 2, PBM_SPECIAL_BASE + 0x2000000ULL);
 
-    /* Wire up PCI interrupts to CPU */
+    /*
+     * Wire up PCI interrupts to CPU 0. The IMAP TID field is ignored, so all
+     * device interrupts go to the boot CPU whatever target the OS asks for.
+     */
     for (i = 0; i < IVEC_MAX; i++) {
         qdev_connect_gpio_out_named(DEVICE(sabre), "ivec-irq", i,
             qdev_get_gpio_in_named(DEVICE(cpu), "ivec-irq", i));
@@ -809,7 +815,7 @@ static void sun4u_class_init(ObjectClass *oc, const void *data)
     mc->desc = "Sun4u platform";
     mc->init = sun4u_init;
     mc->block_default_type = IF_IDE;
-    mc->max_cpus = 1; /* XXX for now */
+    mc->max_cpus = 4;
     mc->is_default = true;
     mc->default_boot_order = "c";
     mc->default_cpu_type = SPARC_CPU_TYPE_NAME("TI-UltraSparc-IIi");

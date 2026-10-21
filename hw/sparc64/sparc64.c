@@ -76,6 +76,7 @@ void sparc64_cpu_set_ivec_irq(void *opaque, int irq, int level)
 typedef struct ResetData {
     SPARCCPU *cpu;
     uint64_t prom_addr;
+    unsigned int nr_resets;
 } ResetData;
 
 static CPUTimer *cpu_timer_create(const char *name, SPARCCPU *cpu,
@@ -110,7 +111,6 @@ static void main_cpu_reset(void *opaque)
 {
     ResetData *s = (ResetData *)opaque;
     CPUSPARCState *env = &s->cpu->env;
-    static unsigned int nr_resets;
 
     cpu_reset(CPU(s->cpu));
 
@@ -121,7 +121,7 @@ static void main_cpu_reset(void *opaque)
     env->gregs[1] = 0; /* Memory start */
     env->gregs[2] = current_machine->ram_size; /* Memory size */
     env->gregs[3] = 0; /* Machine description XXX */
-    if (nr_resets++ == 0) {
+    if (s->nr_resets++ == 0) {
         /* Power on reset */
         env->pc = s->prom_addr + 0x20ULL;
     } else {
@@ -262,7 +262,8 @@ void cpu_tick_set_limit(CPUTimer *timer, uint64_t limit)
     }
 }
 
-SPARCCPU *sparc64_cpu_devinit(const char *cpu_type, uint64_t prom_addr)
+SPARCCPU *sparc64_cpu_devinit(const char *cpu_type, unsigned int id,
+                              uint64_t prom_addr)
 {
     SPARCCPU *cpu;
     CPUSPARCState *env;
@@ -273,6 +274,9 @@ SPARCCPU *sparc64_cpu_devinit(const char *cpu_type, uint64_t prom_addr)
     uint32_t hstick_frequency = 100 * 1000000;
 
     cpu = SPARC_CPU(object_new(cpu_type));
+    /* Only the boot CPU runs at reset; secondaries wait to be started */
+    object_property_set_bool(OBJECT(cpu), "start-powered-off", id != 0,
+                             &error_abort);
     qdev_init_gpio_in_named(DEVICE(cpu), sparc64_cpu_set_ivec_irq,
                             "ivec-irq", IVEC_MAX);
     qdev_realize(DEVICE(cpu), NULL, &error_fatal);

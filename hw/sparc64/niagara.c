@@ -103,7 +103,7 @@ static void niagara_init(MachineState *machine)
     MemoryRegion *sysmem = get_system_memory();
 
     /* init CPUs */
-    sparc64_cpu_devinit(machine->cpu_type, NIAGARA_PROM_BASE);
+    sparc64_cpu_devinit(machine->cpu_type, 0, NIAGARA_PROM_BASE);
     /* set up devices */
     memory_region_init_ram(&s->hv_ram, NULL, "sun4v-hv.ram",
                            NIAGARA_HV_RAM_SIZE, &error_fatal);
