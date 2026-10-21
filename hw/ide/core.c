@@ -1220,8 +1220,13 @@ static void ide_cd_change_cb(void *opaque, bool load, Error **errp)
      *
      * Then we set UNIT_ATTENTION, by which the guest will
      * detect a new CD in the drive.  See ide_atapi_cmd() for details.
+     *
+     * If a medium is already loaded with the tray closed, skip the fake
+     * "removed" report and go straight to UNIT_ATTENTION, as a real drive
+     * does.  Solaris' sd treats NOT READY on open as "no medium" and fails
+     * the open with ENXIO instead of retrying.
      */
-    s->cdrom_changed = 1;
+    s->cdrom_changed = load ? 2 : 1;
     s->events.new_media = true;
     s->events.eject_request = false;
     ide_bus_set_irq(s->bus);
