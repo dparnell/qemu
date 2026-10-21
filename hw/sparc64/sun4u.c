@@ -333,12 +333,24 @@ static void cpu_start_work(CPUState *cs, run_on_cpu_data data)
 {
     CPUStartData *d = data.host_ptr;
     CPUSPARCState *env = cpu_env(cs);
+    unsigned int i;
 
-    /* Same mappings as the boot CPU, as if it had been parked in the PROM */
+    /*
+     * Same locked (firmware and kernel nucleus) mappings as the boot CPU, as if
+     * it had been parked in the PROM. Nothing else: the OS does not send TLB
+     * flushes to this CPU until it is up, so cached entries would go stale.
+     */
     env->immu = d->immu;
     env->dmmu = d->dmmu;
-    memcpy(env->itlb, d->itlb, sizeof(env->itlb));
-    memcpy(env->dtlb, d->dtlb, sizeof(env->dtlb));
+    for (i = 0; i < 64; i++) {
+        bool ilock = TTE_IS_VALID(d->itlb[i].tte) &&
+                     TTE_IS_LOCKED(d->itlb[i].tte);
+        bool dlock = TTE_IS_VALID(d->dtlb[i].tte) &&
+                     TTE_IS_LOCKED(d->dtlb[i].tte);
+
+        env->itlb[i] = ilock ? d->itlb[i] : (SparcTLBEntry){};
+        env->dtlb[i] = dlock ? d->dtlb[i] : (SparcTLBEntry){};
+    }
     env->lsu = d->lsu;
     tlb_flush(cs);
 
